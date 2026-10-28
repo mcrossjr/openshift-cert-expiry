@@ -34,9 +34,16 @@ Examples
   python3 openshift_cert_expiry.py -n payments -n identity --csv cert-expiry.csv
   python3 openshift_cert_expiry.py --all-contexts --threshold-days 30 --quiet
 
-The CSV has one row per certificate. The expiration column is the notAfter
-date (UTC, YYYY-MM-DD). -o prints the CLI report and also writes that file.
---csv FILE writes only the file. --csv with no file writes CSV to stdout.
+The CSV is one row per service certificate, written for people who do not work
+with certificates. CA bundles and intermediate certificates are left out.
+Columns:
+
+  Service/API/Deployment, Issued CN, SAN, Issued OU,
+  Validate Date, Expired Date, Days Left Until Expired
+
+Validate Date is the day the certificate starts working. Expired Date is the
+day it stops. -o prints the CLI report and also writes that file. --csv FILE
+writes only the file. --csv with no file writes CSV to stdout.
 
 Exit status
   0  no certificate expires inside the window
@@ -135,6 +142,8 @@ class CertInfo:
     not_before: datetime
     not_after: datetime
     ca: bool
+    cn: str = ""
+    ou: str = ""
 
 
 @dataclass
@@ -156,6 +165,8 @@ class Finding:
     not_yet_valid: bool
     ca: bool
     status: str
+    cn: str = ""
+    ou: str = ""
     workloads: list[str] = field(default_factory=list)
     services: list[str] = field(default_factory=list)
     routes: list[str] = field(default_factory=list)
@@ -222,7 +233,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         const="-",
         default=None,
         metavar="FILE",
-        help="Write CSV. FILE saves it (cert-expiry.csv). Omit FILE, or pass -, to write CSV to stdout. Column expiration is the notAfter date.",
+        help="Write CSV. FILE saves it (cert-expiry.csv). Omit FILE, or pass -, to write CSV to stdout. Columns are the service, issued name, and expiry dates.",
     )
     parser.add_argument(
         "-o",
@@ -627,8 +638,8 @@ def decode_string(tag: int, raw: bytes) -> str:
     return raw.decode("utf-8", "replace")
 
 
-def parse_name(content: bytes) -> str:
-    parts: list[str] = []
+def parse_name_pairs(content: bytes) -> list[tuple[str, str]]:
+    pairs: list[tuple[str, str]] = []
     index = 0
     while index < len(content):
         tag, rdn, index = der_read(content, index)
@@ -640,10 +651,21 @@ def parse_name(content: bytes) -> str:
             pos = 0
             _, oid_raw, pos = der_read(atv, pos)
             stag, sval, pos = der_read(atv, pos)
-            oid = oid_to_str(oid_raw)
-            label = OID_LABEL.get(oid, oid)
-            parts.append(f"{label}={decode_string(stag, sval)}")
-    return ", ".join(parts)
+            label = OID_LABEL.get(oid_to_str(oid_raw), oid_to_str(oid_raw))
+            pairs.append((label, decode_string(stag, sval)))
+    return pairs
+
+
+def format_name(pairs: list[tuple[str, str]]) -> str:
+    return ", ".join(f"{label}={value}" for label, value in pairs)
+
+
+def name_attr(pairs: list[tuple[str, str]], label: str) -> str:
+    return "; ".join(value for key, value in pairs if key == label)
+
+
+def parse_name(content: bytes) -> str:
+    return format_name(parse_name_pairs(content))
 
 
 def parse_time(tag: int, raw: bytes) -> datetime:
@@ -762,15 +784,18 @@ def parse_cert(der: bytes) -> CertInfo:
     nb_tag, nb_val, vpos = der_read(validity, vpos)
     na_tag, na_val, vpos = der_read(validity, vpos)
     sans, is_ca = parse_extensions(extensions)
+    subject_pairs = parse_name_pairs(subject)
     return CertInfo(
         serial=serial,
         fingerprint=hashlib.sha256(der).hexdigest(),
-        subject=parse_name(subject),
+        subject=format_name(subject_pairs),
         issuer=parse_name(issuer),
         sans=sans,
         not_before=parse_time(nb_tag, nb_val),
         not_after=parse_time(na_tag, na_val),
         ca=is_ca,
+        cn=name_attr(subject_pairs, "CN"),
+        ou=name_attr(subject_pairs, "OU"),
     )
 
 
@@ -1045,6 +1070,8 @@ def analyze(
                     not_yet_valid=not_yet,
                     ca=info.ca,
                     status=status_for(days, args.threshold_days, args.critical_days),
+                    cn=info.cn,
+                    ou=info.ou,
                     workloads=list(workloads_for),
                     services=list(services_for),
                     routes=list(route_list),
@@ -1341,6 +1368,8 @@ def apply_probes(
                 not_yet_valid=info.not_before > now,
                 ca=info.ca,
                 status=status_for(days, args.threshold_days, args.critical_days),
+                cn=info.cn,
+                ou=info.ou,
                 workloads=list(bucket["workloads"]),
                 services=list(bucket["services"]),
                 routes=route_refs,
@@ -1430,61 +1459,84 @@ def emit_json(
     sys.stdout.write("\n")
 
 
-def emit_csv(findings: list[Finding], dest) -> None:
+def service_label(item: Finding) -> str:
+    """Name a non-technical reader can match to the app."""
+    kind_label = {
+        "deployment": "deployment",
+        "deploymentconfig": "deployment",
+        "statefulset": "stateful set",
+        "daemonset": "daemon set",
+        "service": "service",
+        "route": "route",
+        "ingress": "ingress",
+    }
+
+    def one(ref: str) -> str:
+        kind, sep, name = ref.partition("/")
+        if not sep:
+            return ref
+        return f"{name} ({kind_label.get(kind, kind)})"
+
+    names: list[str] = []
+    for ref in item.workloads:
+        label = one(ref)
+        if label not in names:
+            names.append(label)
+    if not names:
+        for ref in item.services:
+            label = one(ref)
+            if label not in names:
+                names.append(label)
+    if not names:
+        for ref in item.routes:
+            label = one(ref.split()[0])
+            if label not in names:
+                names.append(label)
+    if not names:
+        return item.name
+    return "; ".join(names)
+
+
+def emit_csv(findings: list[Finding], dest) -> int:
     fields = [
-        "context",
-        "namespace",
-        "name",
-        "expiration",
-        "days_left",
-        "status",
-        "source",
-        "key",
-        "role",
-        "subject",
-        "issuer",
-        "sans",
-        "serial",
-        "workloads",
-        "services",
-        "routes",
-        "termination",
-        "probe",
-        "notes",
+        "Service/API/Deployment",
+        "Issued CN",
+        "SAN",
+        "Issued OU",
+        "Validate Date",
+        "Expired Date",
+        "Days Left Until Expired",
     ]
     writer = csv.DictWriter(dest, fieldnames=fields, lineterminator="\n")
     writer.writeheader()
+    seen: set[tuple[str, ...]] = set()
+    written = 0
     for item in findings:
-        writer.writerow(
-            {
-                "context": item.context,
-                "namespace": item.namespace,
-                "name": item.name,
-                "expiration": item.not_after.strftime("%Y-%m-%d"),
-                "days_left": item.days_left,
-                "status": item.status,
-                "source": item.source,
-                "key": item.key,
-                "role": item.role,
-                "subject": item.subject,
-                "issuer": item.issuer,
-                "sans": " ".join(item.sans),
-                "serial": item.serial,
-                "workloads": " ".join(item.workloads),
-                "services": " ".join(item.services),
-                "routes": " | ".join(item.routes),
-                "termination": item.termination,
-                "probe": item.probe,
-                "notes": " | ".join(item.notes),
-            }
-        )
+        if item.role != "leaf":
+            continue
+        row = {
+            "Service/API/Deployment": service_label(item),
+            "Issued CN": item.cn,
+            "SAN": " ".join(item.sans),
+            "Issued OU": item.ou,
+            "Validate Date": item.not_before.strftime("%Y-%m-%d"),
+            "Expired Date": item.not_after.strftime("%Y-%m-%d"),
+            "Days Left Until Expired": item.days_left,
+        }
+        key = tuple(str(row[field]) for field in fields)
+        if key in seen:
+            continue
+        seen.add(key)
+        writer.writerow(row)
+        written += 1
+    return written
 
 
-def write_csv_file(path_text: str, findings: list[Finding]) -> None:
+def write_csv_file(path_text: str, findings: list[Finding]) -> int:
     path = Path(path_text)
     try:
         with path.open("w", encoding="utf-8", newline="") as handle:
-            emit_csv(findings, handle)
+            return emit_csv(findings, handle)
     except OSError as exc:
         raise ScanError(f"cannot write {path}: {exc}") from exc
 
@@ -1708,11 +1760,11 @@ def main(argv: list[str] | None = None) -> int:
     csv_path = args.output or (None if args.csv in (None, "-") else args.csv)
     if csv_path:
         try:
-            write_csv_file(csv_path, rows)
+            written = write_csv_file(csv_path, rows)
         except ScanError as exc:
             print(str(exc), file=sys.stderr)
             return 1
-        print(f"wrote {len(rows)} certificates to {csv_path}", file=sys.stderr)
+        print(f"wrote {written} rows to {csv_path}", file=sys.stderr)
     if args.json:
         emit_json(rows, summaries, errors, args, now)
     elif csv_stdout:

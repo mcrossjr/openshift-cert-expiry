@@ -1,26 +1,29 @@
 # OpenShift certificate expiry
 
-CLI scanner that uses `oc` to find TLS certificates, the workloads that mount them, and the Routes in front of those workloads. It writes a CSV with an `expiration` column (`YYYY-MM-DD`, the certificate notAfter date).
+CLI scanner that uses `oc` to find which service certificate expires, and which deployment it belongs to.
 
-Python 3.9+ and the standard library only. `oc` must already be logged in. The account needs get/list on secrets. `cluster-reader` cannot read secrets.
-
-A Route does not point at a Deployment. It points at a Service, and that Service selects pods by label. The certificate is either in a Secret those pods mount, written on the Route, or referenced by `spec.tls.externalCertificate`.
+Python 3.9 or newer. No extra packages. `oc` must already be logged in. The account needs permission to read secrets. `cluster-reader` cannot.
 
 ## Run
 
 ```bash
-python3 openshift_cert_expiry.py
 python3 openshift_cert_expiry.py -o cert-expiry.csv
-python3 openshift_cert_expiry.py --all-contexts --threshold-days 45 --probe -o cert-expiry.csv
-python3 openshift_cert_expiry.py -n payments -n identity --csv cert-expiry.csv
 ```
 
-`-o cert-expiry.csv` prints the report and writes the file. `--csv cert-expiry.csv` writes only the file. `--csv` with no path prints CSV on stdout.
+That prints a report and writes `cert-expiry.csv`. `--csv cert-expiry.csv` writes only the file.
 
-Exit 2 when any certificate is expired or inside the warning window. Exit 1 means `oc` failed or the arguments are wrong.
+## Spreadsheet columns
 
-## CSV columns
+The CSV is for people who do not work with certificates. One row is the certificate a service actually uses. CA bundles are left out.
 
-`context`, `namespace`, `name`, `expiration`, `days_left`, `status`, `source`, `key`, `role`, `subject`, `issuer`, `sans`, `serial`, `workloads`, `services`, `routes`, `termination`, `probe`, `notes`
+| Column | Meaning |
+|---|---|
+| Service/API/Deployment | The app the certificate belongs to |
+| Issued CN | The name printed on the certificate |
+| SAN | Other names the certificate is valid for |
+| Issued OU | The department or team named on the certificate, if any |
+| Validate Date | The day the certificate starts working |
+| Expired Date | The day the certificate stops working |
+| Days Left Until Expired | How many days remain. A negative number means it has already expired |
 
-`expiration` is the notAfter date in UTC.
+Exit 2 when something expires inside 30 days. Exit 1 means `oc` failed.
