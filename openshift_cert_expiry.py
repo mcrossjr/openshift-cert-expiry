@@ -38,8 +38,11 @@ The CSV is one row per service certificate, written for people who do not work
 with certificates. CA bundles and intermediate certificates are left out.
 Columns:
 
-  Service/API/Deployment, Issued CN, SAN, Issued OU,
+  Service/API/Deployment, Issued By, SAN, Issued OU,
   Validate Date, Expired Date, Days Left Until Expired
+
+Issued By is the full name of whoever signed the certificate, not just the
+Common Name. Common Name alone is empty or partial on a lot of certificates.
 
 Validate Date is the day the certificate starts working. Expired Date is the
 day it stops. -o prints the CLI report and also writes that file. --csv FILE
@@ -1499,7 +1502,7 @@ def service_label(item: Finding) -> str:
 def emit_csv(findings: list[Finding], dest) -> int:
     fields = [
         "Service/API/Deployment",
-        "Issued CN",
+        "Issued By",
         "SAN",
         "Issued OU",
         "Validate Date",
@@ -1515,7 +1518,7 @@ def emit_csv(findings: list[Finding], dest) -> int:
             continue
         row = {
             "Service/API/Deployment": service_label(item),
-            "Issued CN": item.cn,
+            "Issued By": item.issuer,
             "SAN": " ".join(item.sans),
             "Issued OU": item.ou,
             "Validate Date": item.not_before.strftime("%Y-%m-%d"),

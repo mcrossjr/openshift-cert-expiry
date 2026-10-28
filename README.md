@@ -19,7 +19,7 @@ The CSV is for people who do not work with certificates. One row is the certific
 | Column | Meaning |
 |---|---|
 | Service/API/Deployment | The app the certificate belongs to |
-| Issued CN | The name printed on the certificate |
+| Issued By | The full name of whoever signed the certificate |
 | SAN | Other names the certificate is valid for |
 | Issued OU | The department or team named on the certificate, if any |
 | Validate Date | The day the certificate starts working |
