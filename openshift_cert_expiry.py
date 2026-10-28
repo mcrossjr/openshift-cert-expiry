@@ -46,9 +46,8 @@ day it stops. -o prints the CLI report and also writes that file. --csv FILE
 writes only the file. --csv with no file writes CSV to stdout.
 
 Exit status
-  0  no certificate expires inside the window
+  0  the scan finished. Expired certificates are still listed; they do not stop the run.
   1  oc failed, or the arguments are wrong
-  2  at least one certificate is expired or inside the window
 """
 
 from __future__ import annotations
@@ -210,7 +209,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Report OpenShift TLS certificate expiry for workloads, secrets, and routes.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="Exit 2 when any certificate is expired or inside --threshold-days.",
+        epilog="A finished scan exits 0 even when certificates are expired or inside --threshold-days. Exit 1 means oc failed.",
     )
     parser.add_argument("--context", action="append", default=[], help="kubeconfig context. Repeatable. Default: current context.")
     parser.add_argument("--all-contexts", action="store_true", help="Scan every context in the kubeconfig.")
@@ -1657,12 +1656,6 @@ def _emit_by_workload(findings: list[Finding], args: argparse.Namespace, color_o
             _emit_finding(item, args, color_on)
 
 
-def worst_status(findings: list[Finding]) -> int:
-    if any(item.status in {"expired", "critical", "warning"} for item in findings):
-        return 2
-    return 0
-
-
 def scan_context(args: argparse.Namespace, context: str, objects: list[dict], now: datetime) -> tuple[list[Finding], ClusterSummary, list[str]]:
     findings, routes, summary, errors = analyze(objects, context, now, args)
     if args.probe:
@@ -1771,7 +1764,7 @@ def main(argv: list[str] | None = None) -> int:
         emit_csv(rows, sys.stdout)
     elif not args.csv:
         emit_human(all_findings, summaries, errors, args, now)
-    return worst_status(all_findings)
+    return 0
 
 
 if __name__ == "__main__":

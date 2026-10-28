@@ -26,4 +26,4 @@ The CSV is for people who do not work with certificates. One row is the certific
 | Expired Date | The day the certificate stops working |
 | Days Left Until Expired | How many days remain. A negative number means it has already expired |
 
-Exit 2 when something expires inside 30 days. Exit 1 means `oc` failed.
+A finished scan exits 0 even when a certificate is already expired or inside 30 days. Those rows are still in the CSV. Exit 1 means `oc` failed.
